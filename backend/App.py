@@ -1,5 +1,6 @@
 from urllib.parse import urlparse, parse_qs
 import json
+import random
 import re
 import tempfile
 import http.cookiejar
@@ -32,17 +33,28 @@ for proxy_key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https
 
 summarizer = None
 transcriber = None
+question_generator = None
 
 
 BASE_DIR = Path(__file__).resolve().parent
-FRONTEND_DIR = BASE_DIR.parent / 'frontend'
-app = Flask(__name__, template_folder=str(FRONTEND_DIR), static_folder=str(FRONTEND_DIR), static_url_path='/static')
+
+# In development: Vite dev server runs on :8080 and proxies API to Flask :5000
+# In production: `npm run build` outputs to frontend-react/dist, served by Flask
+FRONTEND_REACT_DIST = BASE_DIR.parent / 'frontend-react' / 'dist'
+FRONTEND_HTML = BASE_DIR.parent / 'frontend'  # legacy plain HTML fallback
+
+if FRONTEND_REACT_DIST.exists():
+    SERVE_DIR = FRONTEND_REACT_DIST
+else:
+    SERVE_DIR = FRONTEND_HTML
+
+app = Flask(__name__, template_folder=str(SERVE_DIR), static_folder=str(SERVE_DIR), static_url_path='/')
 
 
 def get_summarizer():
     global summarizer
     if summarizer is None:
-        summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+        summarizer = pipeline("summarization", model="sshleifer/distilbart-cnn-12-6")
     return summarizer
 
 
@@ -52,6 +64,12 @@ def get_transcriber():
         from faster_whisper import WhisperModel
         transcriber = WhisperModel("base", device="cpu", compute_type="int8")
     return transcriber
+
+def get_question_generator():
+    global question_generator
+    if question_generator is None:
+        question_generator = pipeline("text2text-generation", model="google/flan-t5-base")
+    return question_generator
 
 def chunk_text(text, max_words=350):
     words = text.split()
@@ -128,60 +146,74 @@ def split_into_sentences(text):
     ]
 
 
-def build_topic_phrase(sentence, max_words=8):
-    cleaned = re.sub(r'\s+', ' ', sentence).strip(" .,!?:;\"'")
-    words = cleaned.split()
-    if not words:
-        return "this part of the summary"
-    phrase = " ".join(words[:max_words])
-    if len(words) > max_words:
-        phrase += "..."
-    return phrase
-
-
 def generate_quiz_questions(summary, question_count=10):
     sentences = split_into_sentences(summary)
     if not sentences:
         return []
 
-    prompts = [
-        "What is the main idea behind \"{topic}\"?",
-        "How does the summary explain \"{topic}\"?",
-        "Why is \"{topic}\" important in the summary?",
-        "What key detail is mentioned about \"{topic}\"?",
-        "What outcome or result is connected to \"{topic}\"?",
-        "What does the summary highlight about \"{topic}\"?",
-        "How would you describe \"{topic}\" in your own words?",
-        "What lesson or insight can be taken from \"{topic}\"?",
-        "Which supporting point in the summary relates to \"{topic}\"?",
-        "How does \"{topic}\" contribute to the overall summary?"
-    ]
+    generator = get_question_generator()
+    questions = []
 
-    questions = ["What is the overall message of this summary?"]
+    # Pass 1: Generate one question per sentence (deterministic)
+    for sentence in sentences:
+        if len(sentence.split()) < 5:
+            continue
+            
+        prompt = f"Generate a quiz question based on this text:\n{sentence}\nQuestion:"
+        try:
+            output = generator(prompt, max_length=64, do_sample=False)
+            question_text = output[0]['generated_text'].strip()
+            
+            if len(question_text) > 10 and "?" in question_text:
+                if question_text not in questions:
+                    questions.append(question_text)
+        except Exception:
+            continue
 
-    for index, sentence in enumerate(sentences):
-        topic = build_topic_phrase(sentence)
-        prompt = prompts[index % len(prompts)]
-        question = prompt.format(topic=topic)
-        if question not in questions:
-            questions.append(question)
         if len(questions) >= question_count:
-            return questions[:question_count]
+            break
 
-    fallback_topics = [
-        "the introduction",
-        "the most important detail",
-        "the central argument",
-        "the final conclusion",
-        "the supporting evidence"
-    ]
+    # Pass 2: If we still need more, loop over sentences again but use AI sampling to generate different questions
+    if len(questions) < question_count and sentences:
+        attempts = 0
+        max_attempts = len(sentences) * 3
+        while len(questions) < question_count and attempts < max_attempts:
+            sentence = sentences[attempts % len(sentences)]
+            attempts += 1
+            
+            if len(sentence.split()) < 5:
+                continue
+                
+            prompt = f"Ask a unique and detailed question about this text:\n{sentence}\nQuestion:"
+            try:
+                output = generator(prompt, max_length=64, do_sample=True, temperature=0.9, top_p=0.9)
+                question_text = output[0]['generated_text'].strip()
+                
+                if len(question_text) > 10 and "?" in question_text:
+                    if question_text not in questions:
+                        questions.append(question_text)
+            except Exception:
+                continue
 
-    fallback_index = 0
-    while len(questions) < question_count:
-        prompt = prompts[len(questions) % len(prompts)]
-        topic = fallback_topics[fallback_index % len(fallback_topics)]
-        questions.append(prompt.format(topic=topic))
-        fallback_index += 1
+    # Fallback: If the text is extremely short and AI fails to reach 10, add generic analytical questions
+    if len(questions) < question_count:
+        generic_questions = [
+            "What is the primary theme or main idea of this summary?",
+            "How does the author support their main point?",
+            "What is the most surprising or important fact mentioned?",
+            "Who do you think is the intended audience for this text?",
+            "What lesson or insight can be taken from this text?",
+            "What is the overall tone of the summary?",
+            "How does the summary conclude or wrap up?",
+            "What evidence or details are provided to support the claims?",
+            "What might be the logical next step based on this text?",
+            "How would you summarize the core message in one sentence?"
+        ]
+        for gq in generic_questions:
+            if gq not in questions:
+                questions.append(gq)
+            if len(questions) >= question_count:
+                break
 
     return questions[:question_count]
 
@@ -464,8 +496,17 @@ def transcribe_youtube_audio(url):
         return transcript_text or None
 
 
-@app.route('/')
-def index():
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def index(path):
+    """Serve the React app for all non-API routes (SPA fallback)."""
+    # Let Flask serve static assets from the dist folder automatically.
+    # For all other paths, return index.html so React Router handles routing.
+    from flask import send_from_directory
+    import os
+    static_file = os.path.join(app.static_folder, path)
+    if path and os.path.exists(static_file):
+        return send_from_directory(app.static_folder, path)
     return render_template('index.html')
 
 
@@ -572,7 +613,12 @@ def summarize_youtube():
         return jsonify({"summary": final_summary})
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        error_msg = str(e)
+        if "NameResolutionError" in error_msg or "Failed to resolve" in error_msg:
+            return jsonify({
+                "error": "Hugging Face Spaces restricts connections to YouTube. Please run the app locally or use a premium hosting plan to use this feature."
+            }), 502
+        return jsonify({"error": error_msg}), 500
 
 
 @app.route('/summarize/video', methods=['POST'])

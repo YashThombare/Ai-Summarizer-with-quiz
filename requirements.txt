@@ -8,3 +8,5 @@ requests==2.32.5
 yt-dlp==2026.3.17
 faster-whisper==1.2.1
 gunicorn==23.0.0
+sentencepiece
+protobuf
