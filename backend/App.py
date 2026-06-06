@@ -395,13 +395,26 @@ def extract_pdf_text(file_bytes):
     return normalize_text(" ".join(page_text))
 
 
+class SilentYTDLPLogger:
+    def debug(self, msg):
+        pass
+    def warning(self, msg):
+        pass
+    def error(self, msg):
+        pass
+
+
 def fetch_transcript_with_ytdlp(url):
     try:
         import yt_dlp
     except ImportError:
         return None
 
-    browser_sources = [None, ("chrome",), ("edge",), ("firefox",), ("brave",)]
+    cookie_file = get_cookie_file()
+    if cookie_file is not None:
+        browser_sources = [None]
+    else:
+        browser_sources = [None, ("chrome",), ("edge",), ("firefox",), ("brave",)]
 
     for browser_source in browser_sources:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -415,9 +428,9 @@ def fetch_transcript_with_ytdlp(url):
                 "outtmpl": output_template,
                 "quiet": True,
                 "no_warnings": True,
+                "logger": SilentYTDLPLogger(),
             }
 
-            cookie_file = get_cookie_file()
             if cookie_file is not None:
                 options["cookiefile"] = str(cookie_file)
 
@@ -444,7 +457,11 @@ def download_audio_with_ytdlp(url, temp_dir):
     except ImportError:
         return None
 
-    browser_sources = [None, ("chrome",), ("edge",), ("firefox",), ("brave",)]
+    cookie_file = get_cookie_file()
+    if cookie_file is not None:
+        browser_sources = [None]
+    else:
+        browser_sources = [None, ("chrome",), ("edge",), ("firefox",), ("brave",)]
 
     for browser_source in browser_sources:
         options = {
@@ -452,9 +469,9 @@ def download_audio_with_ytdlp(url, temp_dir):
             "outtmpl": str(Path(temp_dir) / "audio.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "logger": SilentYTDLPLogger(),
         }
 
-        cookie_file = get_cookie_file()
         if cookie_file is not None:
             options["cookiefile"] = str(cookie_file)
 
@@ -571,7 +588,8 @@ def summarize_youtube():
             return jsonify({"error": "Could not detect the YouTube video ID from the URL"}), 400
 
         try:
-            transcript = YouTubeTranscriptApi().fetch(video_id)
+            session = create_youtube_session()
+            transcript = YouTubeTranscriptApi(http_client=session).fetch(video_id)
             text = " ".join([t.text for t in transcript])
         except (CouldNotRetrieveTranscript, TranscriptsDisabled, VideoUnavailable) as exc:
             direct_page_text = fetch_transcript_from_watch_page(url)

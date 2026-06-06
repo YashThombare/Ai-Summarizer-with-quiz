@@ -27,16 +27,17 @@ const Index = () => {
     setError(null);
 
     try {
+      const API_BASE_URL = import.meta.env.VITE_API_URL || "";
       let response: Response;
 
       if (data.mode === "text") {
-        response = await fetch("/summarize/text", {
+        response = await fetch(`${API_BASE_URL}/summarize/text`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: data.content }),
         });
       } else if (data.mode === "youtube") {
-        response = await fetch("/summarize/youtube", {
+        response = await fetch(`${API_BASE_URL}/summarize/youtube`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ url: data.content }),
@@ -44,7 +45,7 @@ const Index = () => {
       } else if (data.mode === "pdf" && data.file) {
         const formData = new FormData();
         formData.append("file", data.file);
-        response = await fetch("/summarize/pdf", {
+        response = await fetch(`${API_BASE_URL}/summarize/pdf`, {
           method: "POST",
           body: formData,
         });
@@ -71,7 +72,8 @@ const Index = () => {
     setError(null);
 
     try {
-      const response = await fetch("/quiz/generate", {
+      const API_BASE_URL = import.meta.env.VITE_API_URL || "";
+      const response = await fetch(`${API_BASE_URL}/quiz/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ summary }),
